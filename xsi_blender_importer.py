@@ -2,7 +2,7 @@ import bpy
 from mathutils import Matrix, Vector, Euler, Quaternion
 from bpy_extras import image_utils
 
-from . import bz2xsi
+from . import bz2xsi, softimage_pic
 from math import radians, floor, ceil
 import os
 
@@ -74,6 +74,11 @@ class Load:
 		self.filefolder = os.path.dirname(filepath)
 		self.ext_list = self.opt["find_textures_ext"].casefold().split()
 		self.tex_dir = self.context.preferences.filepaths.texture_directory
+		self.texture_search_directories = [self.filefolder]
+		if self.tex_dir:
+			self.texture_search_directories.append(self.tex_dir)
+		if self.opt.get("texture_search_root"):
+			self.texture_search_directories.append(self.opt["texture_search_root"])
 		
 		self.bpy_armature = None		
 		
@@ -233,6 +238,90 @@ class Load:
 				end = frame_end
 		
 		return start, end
+
+	def get_existing_pic_image(self, pic_filepath):
+		for image in bpy.data.images:
+			if image.get("softimage_pic_source") == pic_filepath:
+				return image
+		return None
+
+	def save_pic_as_png(self, bpy_image, pic_filepath):
+		png_filepath = softimage_pic.default_png_path(pic_filepath)
+		bpy_image.filepath_raw = png_filepath
+		bpy_image.file_format = "PNG"
+		bpy_image.save()
+		return png_filepath
+
+	def load_softimage_pic(self, pic_filepath):
+		if self.opt["convert_pic_textures"]:
+			png_filepath = softimage_pic.default_png_path(pic_filepath)
+			if os.path.exists(png_filepath) and os.path.getmtime(png_filepath) >= os.path.getmtime(pic_filepath):
+				bpy_image = image_utils.load_image(
+					png_filepath,
+					place_holder=False,
+					check_existing=True
+				)
+				bpy_image["softimage_pic_source"] = pic_filepath
+				bpy_image["softimage_pic_png"] = png_filepath
+				bpy_image["softimage_pic_format"] = "Softimage PIC"
+				return bpy_image
+
+		existing = self.get_existing_pic_image(pic_filepath)
+		if existing:
+			return existing
+
+		decoded = softimage_pic.read(pic_filepath)
+		image_name = os.path.basename(pic_filepath)
+		bpy_image = bpy.data.images.new(
+			name=image_name,
+			width=decoded.width,
+			height=decoded.height,
+			alpha=decoded.has_alpha
+		)
+		bpy_image.alpha_mode = "CHANNEL_PACKED"
+		bpy_image.pixels.foreach_set([value / 255.0 for value in decoded.pixels])
+		bpy_image["softimage_pic_source"] = pic_filepath
+		bpy_image["softimage_pic_format"] = "Softimage PIC"
+
+		if self.opt["convert_pic_textures"]:
+			png_filepath = self.save_pic_as_png(bpy_image, pic_filepath)
+			bpy.data.images.remove(bpy_image)
+			bpy_image = image_utils.load_image(
+				png_filepath,
+				place_holder=False,
+				check_existing=True
+			)
+			bpy_image["softimage_pic_source"] = pic_filepath
+			bpy_image["softimage_pic_png"] = png_filepath
+			bpy_image["softimage_pic_format"] = "Softimage PIC"
+
+		return bpy_image
+
+	def load_texture_image(self, image_filepath):
+		resolved_path = find_texture(
+			image_filepath,
+			self.texture_search_directories,
+			self.ext_list,
+			self.opt["find_textures"]
+		)
+		extension = os.path.splitext(resolved_path)[1].casefold()
+		if extension == ".pic" and not os.path.exists(resolved_path):
+			resolved_path = find_texture(
+				image_filepath,
+				self.texture_search_directories,
+				self.ext_list,
+				True
+			)
+			extension = os.path.splitext(resolved_path)[1].casefold()
+
+		if extension == ".pic" and os.path.exists(resolved_path):
+			return self.load_softimage_pic(resolved_path)
+
+		return image_utils.load_image(
+			resolved_path,
+			place_holder=True,
+			check_existing=True
+		)
 	
 	def create_object(self, name, data, matrix, bpy_obj_parent=None):
 		bpy_obj = bpy.data.objects.new(name=name, object_data=data)
@@ -485,11 +574,7 @@ class Load:
 		
 		# Texture is used for material
 		if type(image_filepath) == str and not notex:
-			image = image_utils.load_image(
-				find_texture(image_filepath, (self.filefolder, self.tex_dir), self.ext_list, self.opt["find_textures"]),
-				place_holder=True,
-				check_existing=True
-			)
+			image = self.load_texture_image(image_filepath)
 			
 			# BZ2 Chrome
 			if os.path.basename(image_filepath)[0:-4].casefold() == "reflection3":

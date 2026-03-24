@@ -9,6 +9,7 @@ bl_info = {
 }
 
 import bpy
+import os
 
 from bpy.props import (
 	StringProperty,
@@ -27,8 +28,25 @@ from bpy_extras.io_utils import (
 if "bpy" in locals():
 	import importlib
 	if "bz2xsi" in locals(): importlib.reload(bz2xsi)
+	if "bz2pak" in locals(): importlib.reload(bz2pak)
+	if "softimage_pic" in locals(): importlib.reload(softimage_pic)
 	if "xsi_blender_importer" in locals(): importlib.reload(xsi_blender_importer)
 	if "xsi_blender_exporter" in locals(): importlib.reload(xsi_blender_exporter)
+
+def pak_xsi_items(self, context):
+	filepath = getattr(self, "filepath", "")
+	if not filepath or not filepath.casefold().endswith(".pak") or not os.path.exists(filepath):
+		return [("", "Select a .pak file", "")]
+	
+	try:
+		from . import bz2pak
+		archive = bz2pak.PakArchive.read(filepath)
+		paths = archive.list_paths(extension=".xsi")
+		if not paths:
+			return [("", "No .xsi assets in archive", "")]
+		return [(path, path, "") for path in paths]
+	except Exception as exc:
+		return [("", f"PAK read failed: {exc}", "")]
 
 class ImportXSI(bpy.types.Operator, ImportHelper):
 	"""Import BZ2 XSI file"""
@@ -38,8 +56,21 @@ class ImportXSI(bpy.types.Operator, ImportHelper):
 	
 	directory: StringProperty(subtype="DIR_PATH")
 	filename_ext = ".xsi"
-	filter_glob: StringProperty(default="*.xsi", options={"HIDDEN"})
-	texture_image_ext_default = ".png .bmp .jpg .jpeg .gif .tga" # ".tif .tiff .jp2 .jc2 .sgi .rgb .bw .cin .dpx .exr .hdr",
+	filter_glob: StringProperty(default="*.xsi;*.pak", options={"HIDDEN"})
+	texture_image_ext_default = ".pic .png .bmp .jpg .jpeg .gif .tga" # ".tif .tiff .jp2 .jc2 .sgi .rgb .bw .cin .dpx .exr .hdr",
+	
+	pak_xsi_path: EnumProperty(
+		name="Archive Asset",
+		description="XSI asset inside the selected PAK archive",
+		items=pak_xsi_items
+	)
+	
+	pak_cache_dir: StringProperty(
+		name="PAK Cache",
+		description="Optional directory used to cache extracted PAK contents",
+		subtype="DIR_PATH",
+		default=""
+	)
 	
 	emulate_flags: BoolProperty(
 		name="Emulate Flags",
@@ -113,6 +144,12 @@ class ImportXSI(bpy.types.Operator, ImportHelper):
 		default=texture_image_ext_default
 	)
 
+	convert_pic_textures: BoolProperty(
+		name="Convert PIC to PNG",
+		description="Decode Softimage PIC textures and save PNG copies next to the source images",
+		default=True
+	)
+
 	add_material_overrides: BoolProperty(
 		name="Material Custom Properties",
 		description="Adds material values to custom properties, which are used as overrides in the XSI exporter",
@@ -146,6 +183,14 @@ class ImportXSI(bpy.types.Operator, ImportHelper):
 
 	def draw(self, context):
 		layout = self.layout
+		is_pak = self.filepath.casefold().endswith(".pak")
+		
+		if is_pak:
+			pak_layout = layout.box()
+			pak_layout.label(text="PAK Asset Selection", icon="PACKAGE")
+			pak_layout.prop(self, "pak_xsi_path")
+			pak_layout.prop(self, "pak_cache_dir")
+			layout.separator()
 		
 		object_layout = layout.box()
 		object_layout.prop(self, "emulate_flags")
@@ -188,6 +233,9 @@ class ImportXSI(bpy.types.Operator, ImportHelper):
 		sub = texture_layout.column()
 		sub.prop(self, "find_textures_ext")
 		sub.enabled = self.import_mesh_materials and self.import_mesh
+		sub = texture_layout.column()
+		sub.prop(self, "convert_pic_textures")
+		sub.enabled = self.import_mesh_materials and self.import_mesh
 		layout.separator()
 		
 		anim_layout = layout.box()
@@ -208,8 +256,58 @@ class ImportXSI(bpy.types.Operator, ImportHelper):
 	
 	def execute(self, context):
 		from . import xsi_blender_importer
-		keywords = self.as_keywords(ignore=("filter_glob", "directory", "ui_tab"))
+		keywords = self.as_keywords(ignore=("filter_glob", "directory", "ui_tab", "pak_xsi_path", "pak_cache_dir"))
+		
+		if self.filepath.casefold().endswith(".pak"):
+			from . import bz2pak
+			
+			if not self.pak_xsi_path:
+				self.report({"ERROR"}, "Select an XSI asset inside the PAK archive")
+				return {"CANCELLED"}
+			
+			cache_dir = self.pak_cache_dir.strip() if self.pak_cache_dir else None
+			archive, extract_root = bz2pak.ensure_extracted(self.filepath, cache_dir or None)
+			extracted_path = archive.extract_entry(self.pak_xsi_path, extract_root, overwrite=False)
+			keywords["filepath"] = extracted_path
+			keywords["find_textures"] = True
+			keywords["texture_search_root"] = extract_root
+		
 		return xsi_blender_importer.load(self, context, **keywords)
+
+class ExtractPAK(bpy.types.Operator, ImportHelper):
+	"""Extract Battlezone II PAK archive"""
+	bl_idname = "import_scene.io_scene_bz2pak_extract"
+	bl_label = "Extract PAK"
+	bl_options = {"PRESET"}
+	
+	filename_ext = ".pak"
+	filter_glob: StringProperty(default="*.pak", options={"HIDDEN"})
+	
+	output_dir: StringProperty(
+		name="Output Directory",
+		description="Directory to extract the archive contents into",
+		subtype="DIR_PATH",
+		default=""
+	)
+	
+	def draw(self, context):
+		layout = self.layout
+		layout.prop(self, "output_dir")
+	
+	def execute(self, context):
+		from . import bz2pak
+		
+		output_dir = self.output_dir.strip() if self.output_dir else ""
+		if not output_dir:
+			output_dir = os.path.join(
+				os.path.dirname(self.filepath),
+				os.path.splitext(os.path.basename(self.filepath))[0]
+			)
+		
+		archive = bz2pak.PakArchive.read(self.filepath)
+		archive.extract_all(output_dir, overwrite=True)
+		self.report({"INFO"}, f"Extracted {len(archive.entries)} files to {output_dir}")
+		return {"FINISHED"}
 
 class ExportXSI(bpy.types.Operator, ExportHelper):
 	"""Export BZ2 XSI file"""
@@ -334,13 +432,15 @@ class ExportXSI(bpy.types.Operator, ExportHelper):
 		return xsi_blender_exporter.save(self, context, **keywords)
 
 def menu_func_import(self, context):
-	self.layout.operator(ImportXSI.bl_idname, text="BZ2 XSI (.xsi)")
+	self.layout.operator(ImportXSI.bl_idname, text="BZ2 XSI / PAK (.xsi, .pak)")
+	self.layout.operator(ExtractPAK.bl_idname, text="BZ2 PAK Extract (.pak)")
 
 def menu_func_export(self, context):
 	self.layout.operator(ExportXSI.bl_idname, text="BZ2 XSI (.xsi)")
 
 classes = (
 	ImportXSI,
+	ExtractPAK,
 	ExportXSI
 )
 
