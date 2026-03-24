@@ -57,7 +57,7 @@ class ImportXSI(bpy.types.Operator, ImportHelper):
 	directory: StringProperty(subtype="DIR_PATH")
 	filename_ext = ".xsi"
 	filter_glob: StringProperty(default="*.xsi;*.pak", options={"HIDDEN"})
-	texture_image_ext_default = ".pic .png .bmp .jpg .jpeg .gif .tga" # ".tif .tiff .jp2 .jc2 .sgi .rgb .bw .cin .dpx .exr .hdr",
+	texture_image_ext_default = ".pic .png .bmp .jpg .jpeg .gif .tga .dds .dxtbz2" # ".tif .tiff .jp2 .jc2 .sgi .rgb .bw .cin .dpx .exr .hdr",
 	
 	pak_xsi_path: EnumProperty(
 		name="Archive Asset",
@@ -150,6 +150,12 @@ class ImportXSI(bpy.types.Operator, ImportHelper):
 		default=True
 	)
 
+	auto_convert_dxtbz2: BoolProperty(
+		name="Auto-convert .dxtbz2",
+		description="Automatically strip headers from .dxtbz2 files to create .dds files",
+		default=True,
+	)
+
 	add_material_overrides: BoolProperty(
 		name="Material Custom Properties",
 		description="Adds material values to custom properties, which are used as overrides in the XSI exporter",
@@ -235,6 +241,9 @@ class ImportXSI(bpy.types.Operator, ImportHelper):
 		sub.enabled = self.import_mesh_materials and self.import_mesh
 		sub = texture_layout.column()
 		sub.prop(self, "convert_pic_textures")
+		sub.enabled = self.import_mesh_materials and self.import_mesh
+		sub = texture_layout.column()
+		sub.prop(self, "auto_convert_dxtbz2")
 		sub.enabled = self.import_mesh_materials and self.import_mesh
 		layout.separator()
 		

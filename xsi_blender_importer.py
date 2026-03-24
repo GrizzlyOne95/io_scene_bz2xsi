@@ -1,15 +1,74 @@
 import bpy
+import ctypes
 from mathutils import Matrix, Vector, Euler, Quaternion
 from bpy_extras import image_utils
 
 from . import bz2xsi, softimage_pic
-from math import radians, floor, ceil
+from math import radians, floor, ceil, isfinite
+from ctypes import Structure, c_int, c_ubyte, c_uint32, c_uint
+from struct import unpack
 import os
 
 DEBUGGING_BONES = False
 
 # Normals changed in 4.1 from 4.0
 OLD_NORMALS = not (bpy.app.version[0] >= 4 and bpy.app.version[1] >= 1)
+
+DWORD = c_uint32
+DXGI_FORMAT = c_uint32
+D3D10_RESOURCE_DIMENSION = c_uint32
+
+class DXTBZ2Header(Structure):
+	_fields_ = [
+		("m_Sig", c_int),
+		("m_DXTLevel", c_int),
+		("m_1x1Red", c_ubyte),
+		("m_1x1Green", c_ubyte),
+		("m_1x1Blue", c_ubyte),
+		("m_1x1Alpha", c_ubyte),
+		("m_NumMips", c_int),
+		("m_BaseHeight", c_int),
+		("m_BaseWidth", c_int)
+	]
+
+class DDS_PIXELFORMAT(Structure):
+	_fields_ = [
+		("dwSize", DWORD),
+		("dwFlags", DWORD),
+		("dwFourCC", DWORD),
+		("dwRGBBitCount", DWORD),
+		("dwRBitMask", DWORD),
+		("dwGBitMask", DWORD),
+		("dwBBitMask", DWORD),
+		("dwABitMask", DWORD)
+	]
+
+class DDS_HEADER(Structure):
+	_fields_ = [
+		("dwSize", DWORD),
+		("dwFlags", DWORD),
+		("dwHeight", DWORD),
+		("dwWidth", DWORD),
+		("dwPitchOrLinearSize", DWORD),
+		("dwDepth", DWORD),
+		("dwMipMapCount", DWORD),
+		("dwReserved1", DWORD*11),
+		("ddspf", DDS_PIXELFORMAT),
+		("dwCaps", DWORD),
+		("dwCaps2", DWORD),
+		("dwCaps3", DWORD),
+		("dwCaps4", DWORD),
+		("dwReserved2", DWORD)
+	]
+
+class DDS_HEADER_DXT10(Structure):
+	_fields_ = [
+		("dxgiFormat", DXGI_FORMAT),
+		("resourceDimension", D3D10_RESOURCE_DIMENSION),
+		("miscFlag", c_uint),
+		("arraySize", c_uint),
+		("miscFlags2", c_uint)
+	]
 
 class InvalidXSI(Exception): pass
 class UnsupportedAnim(InvalidXSI): pass
@@ -65,6 +124,17 @@ def new_color_layer(bpy_mesh, name="Col"):
 		return bpy_mesh.color_attributes.new(name=name, type="FLOAT_COLOR", domain="CORNER")
 	return bpy_mesh.vertex_colors.new(name=name)
 
+def sanitize_normal(normal):
+	if len(normal) < 3:
+		raise ValueError("Normal must have at least three components")
+	values = tuple(float(component) for component in normal[0:3])
+	if not all(isfinite(component) for component in values):
+		raise ValueError("Normal contains non-finite values")
+	return values
+
+def valid_face(face):
+	return len(face) >= 3 and len(set(face)) >= 3
+
 class Load:
 	def __init__(self, operator, context, filepath="", **opt):
 		self.opt = opt
@@ -73,12 +143,16 @@ class Load:
 		self.name = os.path.basename(filepath)
 		self.filefolder = os.path.dirname(filepath)
 		self.ext_list = self.opt["find_textures_ext"].casefold().split()
+		for ext in (".dds", ".dxtbz2"):
+			if ext not in self.ext_list:
+				self.ext_list.append(ext)
 		self.tex_dir = self.context.preferences.filepaths.texture_directory
 		self.texture_search_directories = [self.filefolder]
 		if self.tex_dir:
 			self.texture_search_directories.append(self.tex_dir)
 		if self.opt.get("texture_search_root"):
 			self.texture_search_directories.append(self.opt["texture_search_root"])
+			self.texture_search_directories.append(os.path.join(self.opt["texture_search_root"], "bitmaps"))
 		
 		self.bpy_armature = None		
 		
@@ -297,6 +371,38 @@ class Load:
 
 		return bpy_image
 
+	def dxtbz2_to_dds(self, filepath):
+		dds_path = os.path.splitext(filepath)[0] + ".dds"
+		if os.path.exists(dds_path):
+			return dds_path
+		try:
+			with open(filepath, "rb") as f_in:
+				header, size = DXTBZ2Header(), c_uint32()
+				f_in.readinto(header)
+				f_in.readinto(size)
+				if header.m_BaseHeight <= 0 or header.m_BaseWidth <= 0:
+					return None
+				has_alpha = size.value // header.m_BaseHeight == header.m_BaseHeight
+				with open(dds_path, "wb") as f_out:
+					dh = DDS_HEADER()
+					dh.dwSize, dh.dwFlags = 124, 0x1 | 0x2 | 0x4 | 0x1000
+					dh.dwHeight, dh.dwWidth = header.m_BaseHeight, header.m_BaseWidth
+					dh.dwMipMapCount, dh.dwCaps = header.m_NumMips, 0x1000
+					dh.ddspf.dwSize, dh.ddspf.dwFlags = 32, 0x4
+					if has_alpha:
+						dh.ddspf.dwFlags |= 0x1
+					dh.ddspf.dwFourCC = unpack("I", b"DX10")[0]
+					f_out.write(b"DDS ")
+					f_out.write(dh)
+					d10 = DDS_HEADER_DXT10()
+					d10.dxgiFormat = 77 if has_alpha else 71
+					d10.resourceDimension, d10.arraySize = 3, 1
+					f_out.write(d10)
+					f_out.write(f_in.read())
+			return dds_path
+		except Exception:
+			return None
+
 	def load_texture_image(self, image_filepath):
 		resolved_path = find_texture(
 			image_filepath,
@@ -305,7 +411,7 @@ class Load:
 			self.opt["find_textures"]
 		)
 		extension = os.path.splitext(resolved_path)[1].casefold()
-		if extension == ".pic" and not os.path.exists(resolved_path):
+		if extension in (".pic", ".dxtbz2") and not os.path.exists(resolved_path):
 			resolved_path = find_texture(
 				image_filepath,
 				self.texture_search_directories,
@@ -316,6 +422,10 @@ class Load:
 
 		if extension == ".pic" and os.path.exists(resolved_path):
 			return self.load_softimage_pic(resolved_path)
+		if extension == ".dxtbz2" and os.path.exists(resolved_path) and self.opt.get("auto_convert_dxtbz2", True):
+			dds_path = self.dxtbz2_to_dds(resolved_path)
+			if dds_path and os.path.exists(dds_path):
+				resolved_path = dds_path
 
 		return image_utils.load_image(
 			resolved_path,
@@ -476,29 +586,55 @@ class Load:
 		return bpy_groups
 	
 	def import_mesh(self, xsi_mesh, name, flags):
+		valid_face_indices = [index for index, face in enumerate(xsi_mesh.faces) if valid_face(face)]
+		filtered_faces = [xsi_mesh.faces[index] for index in valid_face_indices]
+		if len(valid_face_indices) != len(xsi_mesh.faces):
+			print("XSI Warning: Mesh %r dropped %d degenerate face(s) during import." % (
+				name,
+				len(xsi_mesh.faces) - len(valid_face_indices),
+			))
+		
 		bpy_mesh = bpy.data.meshes.new(name)
-		bpy_mesh.from_pydata(xsi_mesh.vertices, [], xsi_mesh.faces)
+		bpy_mesh.from_pydata(xsi_mesh.vertices, [], filtered_faces)
+		bpy_mesh.validate(clean_customdata=False)
+		bpy_mesh.update()
 		
 		if self.opt["import_mesh_normals"] and xsi_mesh.normal_vertices:
-			if xsi_mesh.normal_faces:
+			applied_custom_normals = False
+			vertex_normals = None
+			try:
+				vertex_normals = [sanitize_normal(normal) for normal in xsi_mesh.normal_vertices]
+			except ValueError:
+				vertex_normals = None
+			
+			if vertex_normals and len(vertex_normals) == len(bpy_mesh.vertices):
+				bpy_mesh.normals_split_custom_set_from_vertices(vertex_normals)
+				applied_custom_normals = True
+			elif xsi_mesh.normal_faces:
 				try:
 					normals = []
-					for norm_face in xsi_mesh.normal_faces:
+					normal_faces = xsi_mesh.normal_faces
+					if len(normal_faces) == len(xsi_mesh.faces):
+						normal_faces = [normal_faces[index] for index in valid_face_indices]
+					for norm_face in normal_faces:
 						for norm_index in norm_face:
-							normals += [xsi_mesh.normal_vertices[norm_index]]
-					bpy_mesh.normals_split_custom_set(normals)
-				
-				except IndexError:
-					bpy_mesh.normals_split_custom_set_from_vertices(xsi_mesh.normal_vertices)
+							normals += [sanitize_normal(xsi_mesh.normal_vertices[norm_index])]
+					if len(normals) == len(bpy_mesh.loops):
+						bpy_mesh.normals_split_custom_set(normals)
+						applied_custom_normals = True
+				except (IndexError, ValueError, RuntimeError, TypeError):
+					pass
+			elif vertex_normals and len(vertex_normals) == len(bpy_mesh.vertices):
+				bpy_mesh.normals_split_custom_set_from_vertices(vertex_normals)
+				applied_custom_normals = True
 			
-			else:
-				bpy_mesh.normals_split_custom_set_from_vertices(xsi_mesh.normal_vertices)
-			
-			if OLD_NORMALS:
+			if OLD_NORMALS and applied_custom_normals:
 				bpy_mesh.use_auto_smooth = True
 		
 		if self.opt["import_mesh_materials"]:
 			xsi_face_indices, xsi_materials = xsi_mesh.get_material_indices()
+			if len(xsi_face_indices) == len(xsi_mesh.faces):
+				xsi_face_indices = [xsi_face_indices[index] for index in valid_face_indices]
 			if xsi_materials:
 				for index, xsi_material in enumerate(xsi_materials):
 					bpy_mesh.materials.append(
@@ -521,7 +657,10 @@ class Load:
 			
 			if xsi_mesh.uv_faces:
 				bpy_uv_index = 0
-				for uv_face in xsi_mesh.uv_faces:
+				uv_faces = xsi_mesh.uv_faces
+				if len(uv_faces) == len(xsi_mesh.faces):
+					uv_faces = [uv_faces[index] for index in valid_face_indices]
+				for uv_face in uv_faces:
 					for uv_index in uv_face:
 						bpy_uvmap[bpy_uv_index].uv = Vector(tuple(xsi_mesh.uv_vertices[uv_index]))
 						bpy_uv_index += 1
@@ -535,7 +674,10 @@ class Load:
 			
 			if xsi_mesh.vertex_color_faces:
 				bpy_vcol_index = 0
-				for vcol_face in xsi_mesh.vertex_color_faces:
+				vertex_color_faces = xsi_mesh.vertex_color_faces
+				if len(vertex_color_faces) == len(xsi_mesh.faces):
+					vertex_color_faces = [vertex_color_faces[index] for index in valid_face_indices]
+				for vcol_face in vertex_color_faces:
 					for vcol_index in vcol_face:
 						bpy_vcol[bpy_vcol_index].color = tuple(xsi_mesh.vertex_colors[vcol_index])
 						bpy_vcol_index += 1
