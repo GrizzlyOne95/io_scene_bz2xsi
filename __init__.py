@@ -1,7 +1,7 @@
 bl_info = {
 	"name": "BZ2 XSI format",
 	"author": "FruteSoftware@gmail.com",
-	"version": (1, 0, 8),
+	"version": (1, 0, 9),
 	"blender": (4, 1, 0),
 	"location": "File > Import-Export",
 	"description": "Battlezone II XSI Importer/Exporter",
@@ -179,7 +179,7 @@ class ImportXSI(bpy.types.Operator, ImportHelper):
 		sub.enabled = self.import_mesh # Cannot have envelopes without any vertices to reference
 		
 		if self.import_envelopes and self.import_animations:
-			mesh_layout.label(text="Bone animations are fucked.", icon="ERROR")
+			mesh_layout.label(text="Skinned bone animations may require validation.", icon="ERROR")
 		
 		texture_layout = layout.box()
 		sub = texture_layout.column()

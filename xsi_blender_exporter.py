@@ -24,6 +24,9 @@ DEFAULT_MATERIAL = {
 	"texture": (None, str)
 }
 
+UNIT_SCALE = Vector((1.0, 1.0, 1.0))
+SCALE_EPSILON = 1e-4
+
 # Mesh for hardpoint objects
 def generate_pointer_mesh(scale=0.05):
 	bz2mesh = bz2xsi.Mesh()
@@ -166,6 +169,26 @@ def get_armature(bpy_obj):
 	
 	return armature_mod
 
+def is_unit_scale(scale):
+	return all(abs(axis - unit) <= SCALE_EPSILON for axis, unit in zip(scale, UNIT_SCALE))
+
+def get_active_color_layer(data):
+	if hasattr(data, "color_attributes"):
+		if "Col" in data.color_attributes:
+			return data.color_attributes["Col"].data
+		
+		if data.color_attributes.active_color:
+			return data.color_attributes.active_color.data
+	
+	if hasattr(data, "vertex_colors"):
+		if "Col" in data.vertex_colors:
+			return data.vertex_colors["Col"].data
+		
+		if data.vertex_colors.active:
+			return data.vertex_colors.active.data
+	
+	return None
+
 def obj_hierarchy_to_linear(bpy_objects):
 	for bpy_obj in bpy_objects:
 		for bpy_subobj in bpy_obj.children:
@@ -234,7 +257,7 @@ class Save:
 		# Use the first texture in the node tree if applicable.
 		if material.use_nodes and not mat["texture"]:
 			for node in material.node_tree.nodes:
-				if node.type == "TEX_IMAGE":
+				if node.type == "TEX_IMAGE" and node.image:
 					mat["texture"] = node.image.filepath
 					break # Found an image texture.
 		
@@ -268,7 +291,7 @@ class Save:
 		data = obj_eval.data
 		
 		scale = obj_eval.matrix_local.to_scale()
-		if scale != Vector((1.0, 1.0, 1.0)):
+		if not is_unit_scale(scale):
 			print("XSI Warning: Scaling information %r contained in object %r is not supported by BZ2." % (scale, obj.name))
 		
 		if obj.type == "MESH" and not len(data.vertices) <= 0:
@@ -418,12 +441,11 @@ class Save:
 		
 		elif not ALLOW_MESH_WITH_NO_MATERIAL:
 			print("XSI Warning: Mesh %r has no materials, adding default material." % name)
-			bz2mesh.face_materials = [bz2xsi.Material()] # Default material
+			bz2mesh.face_materials = [bz2xsi.Material()] * len(data.polygons)
 		
 		active_uv_layer = data.uv_layers.active
 		uv_layer = active_uv_layer.data if active_uv_layer else None
-		active_color_layer = data.vertex_colors.active
-		color_layer = active_color_layer.data if active_color_layer else None
+		color_layer = get_active_color_layer(data)
 		
 		# Normals and mesh loop faces (loop indices shared for uv and vert colors)
 		for polygon in data.polygons:

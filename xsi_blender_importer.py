@@ -60,6 +60,11 @@ def flags_from_name(name):
 	
 	return flags
 
+def new_color_layer(bpy_mesh, name="Col"):
+	if hasattr(bpy_mesh, "color_attributes"):
+		return bpy_mesh.color_attributes.new(name=name, type="FLOAT_COLOR", domain="CORNER")
+	return bpy_mesh.vertex_colors.new(name=name)
+
 class Load:
 	def __init__(self, operator, context, filepath="", **opt):
 		self.opt = opt
@@ -142,10 +147,11 @@ class Load:
 				bpy_anim.action = bpy.data.actions.new(name="anim-" + xsi_frame.name)
 				self.import_animations(xsi_frame, bpy_obj, bpy_anim, as_bone=False)
 			
-			start_frame, end_frame = xsi_frame.get_animation_frame_range()
-			self.context.scene.frame_start = start_frame
-			self.context.scene.frame_end = end_frame
-			self.context.scene.frame_current = start_frame
+			start_frame, end_frame = self.get_animation_frame_range(bz2_xsi)
+			if start_frame is not None and end_frame is not None:
+				self.context.scene.frame_start = start_frame
+				self.context.scene.frame_end = end_frame
+				self.context.scene.frame_current = start_frame
 		
 		# Armature will be the only root object, if present
 		if self.bpy_armature:
@@ -210,6 +216,23 @@ class Load:
 		self.ignore_invalid_animations = True
 		
 		return bz2xsi.read(filepath, regex_skip_types=re_skip)
+
+	def get_animation_frame_range(self, bz2_xsi):
+		start = end = None
+		
+		for xsi_frame in bz2_xsi.get_animated_frames():
+			frame_start, frame_end = xsi_frame.get_animation_frame_range()
+			
+			if frame_start is None or frame_end is None:
+				continue
+			
+			if start is None or frame_start < start:
+				start = frame_start
+			
+			if end is None or frame_end > end:
+				end = frame_end
+		
+		return start, end
 	
 	def create_object(self, name, data, matrix, bpy_obj_parent=None):
 		bpy_obj = bpy.data.objects.new(name=name, object_data=data)
@@ -321,8 +344,8 @@ class Load:
 	
 	def import_camera(self, xsi_camera):
 		bpy_data = bpy.data.cameras.new(name=xsi_camera.name)
-		bpy_data.clip_end = xsi_camera.near_plane
-		bpy_data.clip_start = xsi_camera.far_plane
+		bpy_data.clip_start = min(xsi_camera.near_plane, xsi_camera.far_plane)
+		bpy_data.clip_end = max(xsi_camera.near_plane, xsi_camera.far_plane)
 		
 		bpy_obj = self.create_object(
 			xsi_camera.name,
@@ -419,7 +442,7 @@ class Load:
 					bpy_uvmap[index].uv = Vector(tuple(uv_vert))
 		
 		if self.opt["import_mesh_vertcolor"] and xsi_mesh.vertex_colors:
-			bpy_vcol = bpy_mesh.vertex_colors.new().data
+			bpy_vcol = new_color_layer(bpy_mesh).data
 			
 			if xsi_mesh.vertex_color_faces:
 				bpy_vcol_index = 0
