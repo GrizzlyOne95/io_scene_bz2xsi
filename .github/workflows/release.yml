@@ -1,0 +1,156 @@
+name: Blender Add-on Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  seed_release_tag:
+    if: github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release v1.0.9]')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create v1.0.9 tag
+        run: |
+          if git rev-parse -q --verify refs/tags/v1.0.9 >/dev/null; then
+            echo 'v1.0.9 already exists; nothing to do.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a v1.0.9 -m 'BZ2 XSI Blender Add-on v1.0.9'
+          git push origin v1.0.9
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Validate version and runtime files
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import ast
+          import os
+          from pathlib import Path
+
+          tag = os.environ['RELEASE_TAG']
+          expected = tag.removeprefix('v')
+          init_path = Path('__init__.py')
+          tree = ast.parse(init_path.read_text(encoding='utf-8'))
+          info = None
+          for node in tree.body:
+              if isinstance(node, ast.Assign):
+                  for target in node.targets:
+                      if isinstance(target, ast.Name) and target.id == 'bl_info':
+                          info = ast.literal_eval(node.value)
+                          break
+              if info is not None:
+                  break
+          if info is None:
+              raise SystemExit('bl_info not found in __init__.py')
+
+          actual = '.'.join(str(part) for part in info['version'])
+          if actual != expected:
+              raise SystemExit(f'tag {tag} does not match bl_info version {actual}')
+
+          required = [
+              '__init__.py',
+              'bz2xsi.py',
+              'bz2pak.py',
+              'softimage_pic.py',
+              'xsi_blender_importer.py',
+              'xsi_blender_exporter.py',
+              f'docs/RELEASE_NOTES_{tag}.md',
+          ]
+          missing = [path for path in required if not Path(path).is_file()]
+          if missing:
+              raise SystemExit('missing release files: ' + ', '.join(missing))
+
+          print(f'Validated Blender add-on version {actual}')
+          PY
+
+      - name: Byte-compile add-on
+        run: |
+          python -m py_compile \
+            __init__.py \
+            bz2xsi.py \
+            bz2pak.py \
+            softimage_pic.py \
+            xsi_blender_importer.py \
+            xsi_blender_exporter.py
+
+      - name: Build installable Blender ZIP
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euxo pipefail
+          PACKAGE_DIR='dist/io_scene_bz2xsi'
+          mkdir -p "$PACKAGE_DIR"
+          cp __init__.py "$PACKAGE_DIR/"
+          cp bz2xsi.py "$PACKAGE_DIR/"
+          cp bz2pak.py "$PACKAGE_DIR/"
+          cp softimage_pic.py "$PACKAGE_DIR/"
+          cp xsi_blender_importer.py "$PACKAGE_DIR/"
+          cp xsi_blender_exporter.py "$PACKAGE_DIR/"
+          cp README.md "$PACKAGE_DIR/"
+          cp 'Materials Readme.txt' "$PACKAGE_DIR/"
+          cd dist
+          zip -r "io_scene_bz2xsi-${RELEASE_TAG}.zip" io_scene_bz2xsi
+
+      - name: Verify ZIP layout
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import zipfile
+          from pathlib import Path
+
+          tag = os.environ['RELEASE_TAG']
+          archive = Path('dist') / f'io_scene_bz2xsi-{tag}.zip'
+          expected = {
+              'io_scene_bz2xsi/__init__.py',
+              'io_scene_bz2xsi/bz2xsi.py',
+              'io_scene_bz2xsi/bz2pak.py',
+              'io_scene_bz2xsi/softimage_pic.py',
+              'io_scene_bz2xsi/xsi_blender_importer.py',
+              'io_scene_bz2xsi/xsi_blender_exporter.py',
+          }
+          with zipfile.ZipFile(archive) as zf:
+              names = set(zf.namelist())
+          missing = sorted(expected - names)
+          if missing:
+              raise SystemExit('invalid Blender ZIP; missing: ' + ', '.join(missing))
+          print(f'Validated installable archive: {archive}')
+          PY
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: io_scene_bz2xsi-${{ github.ref_name }}
+          path: dist/io_scene_bz2xsi-${{ github.ref_name }}.zip
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            "dist/io_scene_bz2xsi-${RELEASE_TAG}.zip" \
+            --title "BZ2 XSI Blender Add-on ${RELEASE_TAG}" \
+            --notes-file "docs/RELEASE_NOTES_${RELEASE_TAG}.md"
