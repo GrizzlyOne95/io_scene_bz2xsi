@@ -33,15 +33,17 @@ jobs:
           git push origin v1.0.9
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[publish v1.0.9]'))
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'v1.0.9' }}
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'v1.0.9' }}
 
       - name: Validate version and runtime files
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           python - <<'PY'
           import ast
@@ -95,8 +97,6 @@ jobs:
             xsi_blender_exporter.py
 
       - name: Build installable Blender ZIP
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euxo pipefail
           PACKAGE_DIR='dist/io_scene_bz2xsi'
@@ -113,8 +113,6 @@ jobs:
           zip -r "io_scene_bz2xsi-${RELEASE_TAG}.zip" io_scene_bz2xsi
 
       - name: Verify ZIP layout
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           python - <<'PY'
           import os
@@ -142,13 +140,12 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: io_scene_bz2xsi-${{ github.ref_name }}
-          path: dist/io_scene_bz2xsi-${{ github.ref_name }}.zip
+          name: io_scene_bz2xsi-${{ env.RELEASE_TAG }}
+          path: dist/io_scene_bz2xsi-${{ env.RELEASE_TAG }}.zip
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           gh release create "$RELEASE_TAG" \
             "dist/io_scene_bz2xsi-${RELEASE_TAG}.zip" \
