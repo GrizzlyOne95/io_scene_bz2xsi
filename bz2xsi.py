@@ -722,7 +722,8 @@ class Reader:
 				self.skip_block()
 			
 			else:
-				print(self.pos("Unknown Block %r In Mesh" % block_type))
+				if ALLOW_PRINT:
+					print(self.pos("Unknown Block %r In Mesh" % block_type))
 				self.skip_block()
 		
 		return mesh
@@ -864,8 +865,6 @@ class Reader:
 		if envelope_count != 0:
 			if ALLOW_PRINT:
 				print("Envelope Count Mismatch In Envelope List")
-		
-		self.skip_block()
 	
 	def read_envelope(self):
 		frame_name = self.clean(self.parse_type(str))
@@ -1077,12 +1076,7 @@ class Writer:
 			
 			if mesh.vertex_colors and mesh.vertex_color_faces:
 				self.write(t + 1, "SI_MeshVertexColors {")
-				self.write_face_vertices(
-					t + 2,
-					"%f;%f;%f;%f;",
-					mesh.vertex_color_faces,
-					mesh.vertex_colors
-				)
+				self.write_vector_list(t + 2, "%f;%f;%f;%f;", mesh.vertex_colors)
 				self.write_face_list(t + 2, mesh.vertex_color_faces, indexed=True)
 				self.write(t + 1, "}")
 		

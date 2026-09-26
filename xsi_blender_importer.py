@@ -12,7 +12,10 @@ import os
 DEBUGGING_BONES = False
 
 # Normals changed in 4.1 from 4.0
-OLD_NORMALS = not (bpy.app.version[0] >= 4 and bpy.app.version[1] >= 1)
+OLD_NORMALS = bpy.app.version < (4, 1, 0)
+
+# XSI frames are Y-up; root frames get this rotation when "Rotate Root Frames" is enabled.
+YZ_CONVERSION = Euler((radians(90), 0.0, radians(180))).to_matrix().to_4x4()
 
 DWORD = c_uint32
 DXGI_FORMAT = c_uint32
@@ -73,10 +76,15 @@ class DDS_HEADER_DXT10(Structure):
 class InvalidXSI(Exception): pass
 class UnsupportedAnim(InvalidXSI): pass
 
+def is_network_path(filepath):
+	return filepath.replace("\\", "/").startswith("//")
+
 def find_texture(texture_filepath, search_directories, acceptable_extensions, recursive=False):
 	acceptable_extensions = list(acceptable_extensions)
 	
-	if os.path.exists(texture_filepath):
+	# Original XSI files reference textures on the studio network (//SERVER/...); checking such a
+	# path stalls on a network lookup, and BZ2 itself only uses the file name, so search locally.
+	if not is_network_path(texture_filepath) and os.path.exists(texture_filepath):
 		return texture_filepath
 	
 	file_name, original_extension = os.path.splitext(os.path.basename(texture_filepath))
@@ -135,6 +143,55 @@ def sanitize_normal(normal):
 def valid_face(face):
 	return len(face) >= 3 and len(set(face)) >= 3
 
+def new_fcurve(bpy_anim, data_path, index):
+	"""F-Curve on the AnimData's action (layered Actions in Blender 4.4+, legacy list before)."""
+	action = bpy_anim.action
+	if hasattr(action, "fcurve_ensure_for_datablock"):
+		return action.fcurve_ensure_for_datablock(bpy_anim.id_data, data_path, index=index)
+	return action.fcurves.new(data_path=data_path, index=index)
+
+def add_fcurve_keys(bpy_anim, data_path, keys):
+	"""keys: [(frame, vector)], written with linear interpolation (XSI keys are linear)."""
+	for index in range(len(keys[0][1])):
+		fcurve = new_fcurve(bpy_anim, data_path, index)
+		fcurve.keyframe_points.add(len(keys))
+		for point, (keyframe, vector) in zip(fcurve.keyframe_points, keys):
+			point.co = keyframe, vector[index]
+			point.interpolation = "LINEAR"
+		fcurve.extrapolation = "CONSTANT"
+		fcurve.update()
+
+def sample_keys(keys, keyframe, lerp):
+	if keyframe <= keys[0][0]:
+		return keys[0][1]
+	for (frame0, value0), (frame1, value1) in zip(keys, keys[1:]):
+		if frame0 <= keyframe <= frame1:
+			return lerp(value0, value1, 0.0 if frame1 == frame0 else (keyframe - frame0) / (frame1 - frame0))
+	return keys[-1][1]
+
+def key_rotation_matrix(key_type, vector):
+	"""Local rotation of a rotation key. Keys are stored in row-vector form like the frame matrices,
+	so the Blender (column-vector) rotation is the transpose."""
+	if key_type == 0:
+		return Quaternion(vector).normalized().to_matrix().transposed()
+	return Euler(vector).to_matrix().transposed()
+
+def animated_local_matrix(xsi_frame, keyframe, rest_matrix):
+	"""Local matrix of an XSI frame at a keyframe; channels without keys keep rest_matrix."""
+	location, rotation = rest_matrix.to_translation(), rest_matrix.to_3x3().normalized()
+	for xsi_animkey in xsi_frame.animation_keys:
+		keys = sorted(xsi_animkey.keys, key=lambda key: key[0])
+		if not keys:
+			continue
+		if xsi_animkey.key_type == 2:
+			location = Vector(sample_keys(keys, keyframe, lambda a, b, t: Vector(a).lerp(Vector(b), t)))
+		elif xsi_animkey.key_type == 0:
+			q = sample_keys(keys, keyframe, lambda a, b, t: Quaternion(a).normalized().slerp(Quaternion(b).normalized(), t))
+			rotation = key_rotation_matrix(0, q)
+		elif xsi_animkey.key_type == 3:
+			rotation = key_rotation_matrix(3, sample_keys(keys, keyframe, lambda a, b, t: [x + (y - x) * t for x, y in zip(a, b)]))
+	return Matrix.Translation(location) @ rotation.to_4x4()
+
 class Load:
 	def __init__(self, operator, context, filepath="", **opt):
 		self.opt = opt
@@ -147,6 +204,8 @@ class Load:
 			if ext not in self.ext_list:
 				self.ext_list.append(ext)
 		self.tex_dir = self.context.preferences.filepaths.texture_directory
+		if self.tex_dir.startswith("//"): # Relative to the .blend file, meaningless while it is unsaved
+			self.tex_dir = bpy.path.abspath(self.tex_dir) if bpy.data.filepath else ""
 		self.texture_search_directories = [self.filefolder]
 		if self.tex_dir:
 			self.texture_search_directories.append(self.tex_dir)
@@ -157,8 +216,10 @@ class Load:
 		self.bpy_armature = None		
 		
 		# Note: we are assuming unique frame names using these.
-		self.bpy_obj_of_bone = {}
-		self.animated_bones = set()
+		self.texture_cache = {} # XSI texture path -> Blender image
+		self.bone_names = {} # XSI bone frame -> Blender bone name
+		self.bone_rest = {} # XSI bone frame -> bind matrix in armature space
+		self.skinned_objects = [] # (XSI frame, Blender object) deformed by the armature
 		self.animated_objects = []
 		
 		self.bpy_objects = [] # All objects we create
@@ -198,33 +259,31 @@ class Load:
 				self.bpy_armature.data.axes_position = 0.0 # 1.0 for tail, 0.0 for head
 			
 			bpy.ops.object.mode_set(mode="EDIT")
-			
+
 			for xsi_frame in bz2_xsi.frames:
 				self.walk_skel(xsi_frame)
-			
+
 			bpy.ops.object.mode_set(mode="OBJECT")
-		
+
+			# Envelope vertices are stored in the bind pose, so skinned meshes sit at their
+			# bind (base pose) transform directly under the armature.
+			for xsi_frame, bpy_obj in self.skinned_objects:
+				bpy_obj.parent = self.bpy_armature
+				bpy_obj.matrix_parent_inverse = Matrix()
+				bpy_obj.matrix_basis = self.base_world_matrix(xsi_frame)
+
+			self.pose_skeleton(bz2_xsi if self.opt["import_animations"] else None)
+
 		if self.opt["import_animations"] and bz2_xsi.is_animated():
 			root_frame_options = self.opt["rotate_for_yz"] or self.opt["place_at_cursor"]
-			
-			if self.bpy_armature:
-				bpy_anim = self.bpy_armature.animation_data_create()
-				bpy_anim.action = bpy.data.actions.new(name="Skeleton Animations")
-				
-				for xsi_frame, name in self.animated_bones:
-					if not xsi_frame.parent and root_frame_options:
-						print("Root-level bone has animation: %r" % xsi_frame.get_chained_name())
-					
-					bpy_posebone = self.bpy_armature.pose.bones[name]
-					self.import_animations(xsi_frame, bpy_posebone, bpy_anim, as_bone=True)
-			
+
 			for xsi_frame, bpy_obj in self.animated_objects:
 				if not xsi_frame.parent and root_frame_options:
 					print("Root-level frame has animation: %r" % xsi_frame.get_chained_name())
 				
 				bpy_anim = bpy_obj.animation_data_create()
 				bpy_anim.action = bpy.data.actions.new(name="anim-" + xsi_frame.name)
-				self.import_animations(xsi_frame, bpy_obj, bpy_anim, as_bone=False)
+				self.import_animations(xsi_frame, bpy_obj, bpy_anim)
 			
 			start_frame, end_frame = self.get_animation_frame_range(bz2_xsi)
 			if start_frame is not None and end_frame is not None:
@@ -241,9 +300,8 @@ class Load:
 		
 		for bpy_obj in bpy_root_objects:
 			if self.opt["rotate_for_yz"]:
-				bpy_obj.rotation_euler[0] = radians(90)
-				bpy_obj.rotation_euler[2] = radians(180)
-				bpy_obj.location[1], bpy_obj.location[2] = bpy_obj.location[2], bpy_obj.location[1] # Swap y and z
+				# Convert the whole root transform (location and rotation) from XSI Y-up to Blender Z-up
+				bpy_obj.matrix_basis = YZ_CONVERSION @ bpy_obj.matrix_basis
 			
 			if self.opt["place_at_cursor"]:
 				bpy_obj.location += context.scene.cursor.location
@@ -404,6 +462,12 @@ class Load:
 			return None
 
 	def load_texture_image(self, image_filepath):
+		# Materials of one model share a few textures; resolve each path once per import
+		if image_filepath not in self.texture_cache:
+			self.texture_cache[image_filepath] = self.resolve_texture_image(image_filepath)
+		return self.texture_cache[image_filepath]
+	
+	def resolve_texture_image(self, image_filepath):
 		resolved_path = find_texture(
 			image_filepath,
 			self.texture_search_directories,
@@ -475,12 +539,8 @@ class Load:
 		if self.bpy_armature and bpy_mesh and xsi_frame.envelopes:
 			self.import_envelopes(xsi_frame, bpy_obj)
 			bpy_obj.modifiers.new(name="Armature", type="ARMATURE").object = self.bpy_armature
-			pass
-			# raise Exception("Empty object cannot have envelopes %r." % (bpy_obj.name))
-		
-		if xsi_frame.is_bone:
-			self.bpy_obj_of_bone[xsi_frame.name] = bpy_obj # So walk_skel() can get this object
-		
+			self.skinned_objects += [(xsi_frame, bpy_obj)]
+
 		if xsi_frame.animation_keys:
 			self.animated_objects += [(xsi_frame, bpy_obj)]
 		
@@ -489,45 +549,104 @@ class Load:
 		
 		return bpy_obj
 	
+	def base_world_matrix(self, xsi_frame):
+		"""Bind (base pose) matrix of a frame relative to the XSI root, falling back to the
+		transform matrix for frames without an SI_FrameBasePoseMatrix."""
+		matrix = self.import_matrix(xsi_frame.pose or xsi_frame.transform)
+		return self.base_world_matrix(xsi_frame.parent) @ matrix if xsi_frame.parent else matrix
+
+	def animated_world_matrix(self, xsi_frame, keyframe, cache):
+		if xsi_frame not in cache:
+			rest = self.import_matrix(xsi_frame.transform)
+			local = animated_local_matrix(xsi_frame, keyframe, rest) if keyframe is not None else rest
+			cache[xsi_frame] = self.animated_world_matrix(xsi_frame.parent, keyframe, cache) @ local if xsi_frame.parent else local
+		return cache[xsi_frame]
+
 	def walk_skel(self, xsi_frame, bpy_editbone_parent=None):
-		bpy_editbone = None
-		
+		"""Bones are placed at their frames' bind matrices (bone Y axis = frame Y axis), so envelope
+		weights deform exactly like BZ2. A plain frame between two bones does not break the chain."""
+		bpy_editbone = bpy_editbone_parent
+
 		if xsi_frame.is_bone:
+			rest = self.base_world_matrix(xsi_frame)
+			head = rest.to_translation()
+			child_heads = [self.base_world_matrix(child).to_translation() for child in xsi_frame.frames]
+			length = ((sum(child_heads, Vector()) / len(child_heads)) - head).length if child_heads else 0.0
+			if length < 1e-4:
+				length = bpy_editbone_parent.length * 0.5 if bpy_editbone_parent else 1.0
+
 			bpy_editbone = self.bpy_armature.data.edit_bones.new(xsi_frame.name)
 			bpy_editbone.parent = bpy_editbone_parent
-			
-			bpy_matrix = self.bpy_obj_of_bone[xsi_frame.name].matrix_world
-			bpy_vector = bpy_matrix.to_translation()
-			bpy_editbone.head = (bpy_vector.x, bpy_vector.y, bpy_vector.z)
-			bpy_child_positions = [child.matrix_world.to_translation() for child in self.bpy_obj_of_bone[xsi_frame.name].children]
-			
-			if bpy_child_positions:
-				child_sum = Vector((0.0, 0.0, 0.0))
-				for bpy_child_vector in bpy_child_positions:
-					child_sum += bpy_child_vector
-				
-				child_average = child_sum / len(bpy_child_positions)
-				bpy_editbone.tail = (child_average.x, child_average.y, child_average.z)
-			
-			else:
-				if bpy_editbone_parent:
-					# Make it continue along the same direction as its parent with 1/10 the length
-					bpy_editbone.tail = bpy_editbone_parent.head
-					bpy_editbone.length = -bpy_editbone.length/10
-				
-				else:
-					# No parent, no children.
-					bpy_editbone.tail = (bpy_vector.x, bpy_vector.y, bpy_vector.z + 1.0)
-			
-			if (bpy_editbone.head == bpy_editbone.tail):
-				bpy_editbone.tail = (bpy_vector.x, bpy_vector.y, bpy_vector.z + 1.0)
-				print("Zero-length bone %r" % xsi_frame.get_chained_name())
-				# raise Exception("Zero-length bone %r" % xsi_frame.get_chained_name())
-			
-			self.animated_bones.add((xsi_frame, bpy_editbone.name))
-		
+			bpy_editbone.head = (0.0, 0.0, 0.0)
+			bpy_editbone.tail = (0.0, length, 0.0)
+			bone_matrix = rest.to_3x3().normalized().to_4x4()
+			bone_matrix.translation = head
+			bpy_editbone.matrix = bone_matrix
+
+			self.bone_names[xsi_frame] = bpy_editbone.name
+			self.bone_rest[xsi_frame] = rest
+
 		for xsi_sub_frame in xsi_frame.frames:
 			self.walk_skel(xsi_sub_frame, bpy_editbone)
+
+	def pose_skeleton(self, bz2_xsi=None):
+		"""Pose bones so each one follows its frame's animated world matrix.
+		For bone b with parent bone p (Blender rest R, bind W_base, animated W):
+		  pose(b) = W(b) @ W_base(b)^-1 @ R(b), and basis = R(b)^-1 @ R(p) @ pose(p)^-1 @ pose(b).
+		Channels without keys keep the frame's transform matrix, which may differ from the bind pose."""
+		bones = self.bpy_armature.data.bones
+
+		def ancestors(xsi_frame):
+			while xsi_frame:
+				yield xsi_frame
+				xsi_frame = xsi_frame.parent
+
+		def parent_bone(xsi_frame):
+			return next((f for f in ancestors(xsi_frame.parent) if f in self.bone_names), None) if xsi_frame.parent else None
+
+		def pose_matrix(xsi_frame, keyframe, cache):
+			rest = Matrix(bones[self.bone_names[xsi_frame]].matrix_local)
+			return self.animated_world_matrix(xsi_frame, keyframe, cache) @ self.bone_rest[xsi_frame].inverted() @ rest
+
+		def basis(xsi_frame, keyframe, cache):
+			rest = Matrix(bones[self.bone_names[xsi_frame]].matrix_local)
+			matrix = rest.inverted() @ pose_matrix(xsi_frame, keyframe, cache)
+			parent = parent_bone(xsi_frame)
+			if parent:
+				parent_rest = Matrix(bones[self.bone_names[parent]].matrix_local)
+				matrix = rest.inverted() @ parent_rest @ pose_matrix(parent, keyframe, cache).inverted() @ pose_matrix(xsi_frame, keyframe, cache)
+			return matrix
+
+		bpy_anim = None
+		for xsi_frame, bone_name in self.bone_names.items():
+			bpy_posebone = self.bpy_armature.pose.bones[bone_name]
+			bpy_posebone.rotation_mode = "QUATERNION"
+			keyframes = sorted({key[0] for f in ancestors(xsi_frame) for k in f.animation_keys for key in k.keys}) if bz2_xsi else []
+
+			if not keyframes:
+				# Unanimated: the transform matrix is the pose shown by the file
+				matrix = basis(xsi_frame, None, {})
+				bpy_posebone.location = matrix.to_translation()
+				bpy_posebone.rotation_quaternion = matrix.to_quaternion()
+				continue
+
+			if not bpy_anim:
+				bpy_anim = self.bpy_armature.animation_data_create()
+				bpy_anim.action = bpy.data.actions.new(name="Skeleton Animations")
+
+			locations, rotations, previous = [], [], None
+			for keyframe in keyframes:
+				matrix = basis(xsi_frame, keyframe, {})
+				rotation = matrix.to_quaternion()
+				if previous is not None and previous.dot(rotation) < 0.0:
+					rotation.negate() # Keep quaternion keys continuous
+				previous = rotation
+				locations.append((keyframe, tuple(matrix.to_translation())))
+				rotations.append((keyframe, tuple(rotation)))
+
+			data_path = 'pose.bones["%s"].' % bpy.utils.escape_identifier(bone_name)
+			add_fcurve_keys(bpy_anim, data_path + "location", locations)
+			add_fcurve_keys(bpy_anim, data_path + "rotation_quaternion", rotations)
 	
 	def import_light(self, xsi_light):
 		bpy_data = bpy.data.lights.new(name=xsi_light.name, type="POINT")
@@ -700,7 +819,7 @@ class Load:
 		alpha = float(xsi_material.diffuse[3]) if len(xsi_material.diffuse) >= 4 else 1.0
 		specular_rgb = tuple(float(x) for x in xsi_material.specular[0:3]) if len(xsi_material.specular) >= 3 else (0.5, 0.5, 0.5)
 		
-		bpy_node_bsdf = bpy_material.node_tree.nodes["Principled BSDF"]
+		bpy_node_bsdf = next(node for node in bpy_material.node_tree.nodes if node.type == "BSDF_PRINCIPLED")
 		bpy_node_bsdf.inputs["Base Color"].default_value = tuple(xsi_material.diffuse[0:3]) + (1.0,)
 		bpy_node_bsdf.inputs["Specular IOR Level"].default_value = 0.5 # Specular Intensity
 		bpy_node_bsdf.inputs["Specular Tint"].default_value = tuple((*specular_rgb, 1.0))
@@ -720,8 +839,8 @@ class Load:
 			
 			# BZ2 Chrome
 			if os.path.basename(image_filepath)[0:-4].casefold() == "reflection3":
-				bpy_node_bsdf.inputs[4].default_value = 1.0 # Metallic
-				bpy_node_bsdf.inputs[7].default_value = 0.0 # Roughness
+				bpy_node_bsdf.inputs["Metallic"].default_value = 1.0
+				bpy_node_bsdf.inputs["Roughness"].default_value = 0.0
 			
 			# Texture image
 			bpy_node_texture = bpy_material.node_tree.nodes.new("ShaderNodeTexImage")
@@ -826,20 +945,12 @@ class Load:
 		
 		return bpy_material
 	
-	def import_animations(self, xsi_frame, bpy_animated, bpy_anim, as_bone=False):
+	def import_animations(self, xsi_frame, bpy_animated, bpy_anim):
+		"""Object animation. Keys are complete local transforms, so they replace the object's
+		matrix channels (bones are posed by pose_skeleton instead)."""
 		key_data_paths = ["rotation_quaternion", "scale", "location", "rotation_euler"]
 		bpy_mult = Matrix()
-		
-		if as_bone:
-			# bpy_animated is a PoseBone
-			key_data_paths = ["pose.bones[\"%s\"].%s" % (bpy_animated.name, data_path) for data_path in key_data_paths]
-			bpy_mult = Matrix()
-			# TODO: This is where we can fix the fucked up bone anims
-		
-		else:
-			# bpy_animated is an Object
-			bpy_mult = bpy_animated.matrix_local
-		
+
 		for xsi_animkey in xsi_frame.animation_keys:
 			key_type = xsi_animkey.key_type
 			
@@ -916,18 +1027,8 @@ class Load:
 						bpy_quat = Euler((vector[0], vector[1], vector[2])).to_quaternion()
 						keys[index] = keyframe, (bpy_quat.w, bpy_quat.x, bpy_quat.y, bpy_quat.z)
 			
-			fcurves = [bpy_anim.action.fcurves.new(data_path=data_path, index=index) for index in range(vector_size)]
-			
-			for fcurve in fcurves:
-				fcurve.keyframe_points.add(len(keys))
-			
-			for index, (keyframe, vector) in enumerate(keys):
-				for fcurve_index, fcurve in enumerate(fcurves):
-					fcurve.keyframe_points[index].co = keyframe, vector[fcurve_index]
-			
-			for fcurve in fcurves:
-				fcurve.extrapolation = "LINEAR"
-				fcurve.update()
+			if keys:
+				add_fcurve_keys(bpy_anim, data_path, sorted(keys, key=lambda key: key[0]))
 
 def load(operator, context, filepath="", **opt):
 	Load(operator, context, filepath, **opt)

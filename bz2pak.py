@@ -22,8 +22,9 @@ class PakEntry:
 	size: int
 
 	def archive_path(self, directories):
-		if 0 <= self.directory_index < len(directories):
-			directory = directories[self.directory_index]
+		# The file table numbers directories from 1 (0 = archive root).
+		if 1 <= self.directory_index <= len(directories):
+			directory = directories[self.directory_index - 1]
 			if directory:
 				return directory + "\\" + self.name
 		return self.name

@@ -15,7 +15,15 @@ Blender add-on for importing and exporting Battlezone II / Combat Commander XSI 
 
 The add-on metadata requires **Blender 4.1 or newer**. The current v1.0.9 code includes compatibility work for the Blender 4.5 LTS API, including modern mesh normals and color attributes.
 
+Animation import/export also works with the layered Actions of Blender 4.4+ and Blender 5.x.
+
 This repository is distributed as a **legacy Blender add-on** rather than a Blender Extensions package. Blender 4.5 LTS still supports installing legacy add-ons from disk.
+
+## Skinned models
+
+Skinned (enveloped) XSI files import as an armature whose bones sit at the frames' `SI_FrameBasePoseMatrix` bind pose (bone Y axis = frame Y axis), with the skinned meshes placed at their bind transform. Bone animation is converted so every bone follows its frame's animated matrix, including animated plain frames between two bones, so the deformation matches the XSI data exactly (verified against a numpy re-implementation on `mcwing_fly.xsi` and `jak_kill.xsi`). Frames that are also objects keep their object animation.
+
+On export, skinned meshes are written in the armature's rest pose, matching the exported bone rest matrices.
 
 ## Install from a GitHub Release
 
@@ -39,6 +47,10 @@ For a source checkout, create an `io_scene_bz2xsi` directory inside Blender's ad
 - `xsi_blender_exporter.py`
 
 Restart Blender or refresh add-ons, then enable **BZ2 XSI format**.
+
+## Tests
+
+`tests/xsi_parse_corpus.py <folder>` parses every XSI in a folder with `bz2xsi` alone. `tests/xsi_blender_tests.py` runs named importer/exporter regression tests headless in Blender (`blender -b --factory-startup -P tests/xsi_blender_tests.py -- [tests]`); see its docstring for the corpus environment variables.
 
 ## Release packaging
 
