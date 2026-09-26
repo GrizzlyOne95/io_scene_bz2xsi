@@ -33,20 +33,29 @@ if "bpy" in locals():
 	if "xsi_blender_importer" in locals(): importlib.reload(xsi_blender_importer)
 	if "xsi_blender_exporter" in locals(): importlib.reload(xsi_blender_exporter)
 
+# Blender needs Python to keep the enum item strings alive, and the callback runs on every redraw,
+# so the item list of the last PAK read is cached per file path and modification time.
+_pak_items_cache = {"key": None, "items": [("", "Select a .pak file", "")]}
+
 def pak_xsi_items(self, context):
 	filepath = getattr(self, "filepath", "")
 	if not filepath or not filepath.casefold().endswith(".pak") or not os.path.exists(filepath):
-		return [("", "Select a .pak file", "")]
+		_pak_items_cache["key"] = None
+		_pak_items_cache["items"] = [("", "Select a .pak file", "")]
+		return _pak_items_cache["items"]
 	
-	try:
-		from . import bz2pak
-		archive = bz2pak.PakArchive.read(filepath)
-		paths = archive.list_paths(extension=".xsi")
-		if not paths:
-			return [("", "No .xsi assets in archive", "")]
-		return [(path, path, "") for path in paths]
-	except Exception as exc:
-		return [("", f"PAK read failed: {exc}", "")]
+	key = (filepath, os.path.getmtime(filepath))
+	if _pak_items_cache["key"] != key:
+		try:
+			from . import bz2pak
+			archive = bz2pak.PakArchive.read(filepath)
+			paths = archive.list_paths(extension=".xsi")
+			items = [(path, path, "") for path in paths] if paths else [("", "No .xsi assets in archive", "")]
+		except Exception as exc:
+			items = [("", f"PAK read failed: {exc}", "")]
+		_pak_items_cache["key"] = key
+		_pak_items_cache["items"] = items
+	return _pak_items_cache["items"]
 
 class ImportXSI(bpy.types.Operator, ImportHelper):
 	"""Import BZ2 XSI file"""

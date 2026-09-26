@@ -1,10 +1,11 @@
 import bpy
+import ntpath
 from mathutils import Matrix, Vector
 
 from . import bz2xsi
 
 # Normals changed in 4.1 from 4.0
-OLD_NORMALS = not (bpy.app.version[0] >= 4 and bpy.app.version[1] >= 1)
+OLD_NORMALS = bpy.app.version < (4, 1, 0)
 
 USE_FRAME_NAME_AS_MESH_NAME = True
 ALLOW_MESH_WITH_NO_FACES = False
@@ -51,7 +52,8 @@ def generate_bone_mesh(bone, posebone):
 	base = bone.length*0.20
 	tip = bone.length
 	
-	rgb = tuple(posebone.bone_group.colors.active)[0:3] if posebone.bone_group else bz2xsi.DEFAULT_DIFFUSE[0:3]
+	bone_group = getattr(posebone, "bone_group", None) # Removed in Blender 4.0
+	rgb = tuple(bone_group.colors.active)[0:3] if bone_group else bz2xsi.DEFAULT_DIFFUSE[0:3]
 	rgba = rgb + (0.80,)
 	
 	bz2mesh = bz2xsi.Mesh()
@@ -118,24 +120,36 @@ def generate_bone_mesh(bone, posebone):
 	
 	return bz2mesh
 
-def get_keyframes_filtered(action, keyframe_filter):
-	filtered_points = {key: [] for key in keyframe_filter}
-	key_min, key_max = tuple(action.frame_range)
+def action_fcurves(animation_data):
+	"""F-Curves animating an ID: its slot of a layered Action (Blender 4.4+), or the legacy list."""
+	action = animation_data.action
+	layers = getattr(action, "layers", None)
+	if layers:
+		slot = getattr(animation_data, "action_slot", None)
+		for layer in layers:
+			for strip in layer.strips:
+				for bag in getattr(strip, "channelbags", []):
+					if slot is None or bag.slot == slot:
+						yield from bag.fcurves
+	elif hasattr(action, "fcurves"):
+		yield from action.fcurves
+
+# Returns {data path: sorted unique whole keyframes}, one entry per keyed frame across all channels
+def get_keyframes_filtered(animation_data, keyframe_filter):
+	filtered_frames = {key: set() for key in keyframe_filter}
+	key_min, key_max = tuple(animation_data.action.frame_range)
 	
-	for fcurve in action.fcurves:
+	for fcurve in action_fcurves(animation_data):
 		if not fcurve.data_path in keyframe_filter:
 			continue
-		
-		for point in fcurve.keyframe_points:
-			pos = int(point.co[0])
-			
-			if point.co[0] in filtered_points[fcurve.data_path]:
-				continue
-			
-			if pos >= key_min and pos <= key_max:
-				filtered_points[fcurve.data_path].append(point)
 
-	return filtered_points
+		for point in fcurve.keyframe_points:
+			pos = round(point.co[0])
+
+			if pos >= key_min and pos <= key_max:
+				filtered_frames[fcurve.data_path].add(pos)
+
+	return {key: sorted(frames) for key, frames in filtered_frames.items()}
 
 # Returns dictionary of {Bone Name: [(Vert Index, Vert Weight)...]}
 def get_vertex_weights(obj, group_names=None):
@@ -156,6 +170,11 @@ def get_vertex_weights(obj, group_names=None):
 				vertex_weights[name].append((vertex.index, group.weight * 100.0))
 	
 	return vertex_weights
+
+def get_parents(bpy_obj):
+	while bpy_obj.parent:
+		bpy_obj = bpy_obj.parent
+		yield bpy_obj
 
 def get_armature(bpy_obj):
 	armature_mod = None
@@ -209,12 +228,17 @@ class Save:
 			# This is so animated objects keyframe offset does not affect object's unanimated pose or matrix.
 			# We'll set it back to original_keyframe_position later when we're done.
 			bpy.context.scene.frame_set(bpy.context.scene.frame_start)
+
+		# Rest transforms are read at this frame; animation sampling returns here afterwards.
+		self.rest_frame = bpy.context.scene.frame_current
 		
 		if opt["export_mode"] == "ACTIVE_COLLECTION":
 			objects = [obj for obj in bpy.context.view_layer.active_layer_collection.collection.objects if (obj.parent == None and not obj.hide_viewport)]
 		
 		elif opt["export_mode"] == "SELECTED_OBJECTS":
-			objects = [obj for obj in bpy.data.objects if obj.select_get()]
+			selected = [obj for obj in bpy.context.view_layer.objects if obj.select_get()]
+			# Selected children are exported with their selected parent, not again as roots
+			objects = [obj for obj in selected if not any(parent in selected for parent in get_parents(obj))]
 		
 		if len(objects) >= 2:
 			print("XSI Warning: BZ2 does not support more than 1 root-level object:", ", ".join(obj.name for obj in objects))
@@ -258,7 +282,7 @@ class Save:
 		if material.use_nodes and not mat["texture"]:
 			for node in material.node_tree.nodes:
 				if node.type == "TEX_IMAGE" and node.image:
-					mat["texture"] = node.image.filepath
+					mat["texture"] = ntpath.basename(node.image.filepath) # BZ2 looks textures up by file name
 					break # Found an image texture.
 		
 		return bz2xsi.Material(
@@ -300,9 +324,19 @@ class Save:
 			
 			else:
 				if self.opt["export_mesh"]:
+					if is_skinned:
+						# Envelope vertices must be in the bind pose, which matches the exported bone rest matrices
+						armature = get_armature(obj)
+						pose_position = armature.data.pose_position
+						armature.data.pose_position = "REST"
+						bpy.context.view_layer.update()
+						data = obj.evaluated_get(self.depsgraph).data
+					
 					bz2frame.mesh = self.mesh_to_bz2mesh(data, bz2frame.name if USE_FRAME_NAME_AS_MESH_NAME else None)
 					
 					if is_skinned:
+						armature.data.pose_position = pose_position
+						bpy.context.view_layer.update()
 						self.enveloped_bz2frames[bz2frame] = obj_eval
 		
 		elif obj.type == "ARMATURE":
@@ -325,7 +359,7 @@ class Save:
 				if is_root_level:
 					print("XSI Warning: Root-level object %r animation data may not behave as expected in BZ2." % obj.name)
 				
-				bz2frame.animation_keys += list(self.animation_to_bz2anim(obj_eval))
+				bz2frame.animation_keys += bz2_animations
 		
 		for obj in obj.children:
 			if obj.type in ALLOWED_SUB_OBJECTS:
@@ -333,30 +367,35 @@ class Save:
 		
 		return bz2frame
 	
-	def animation_to_bz2anim(self, obj):
-		filtered_keyframe_points = get_keyframes_filtered(obj.animation_data.action, KEYFRAME_PATHS)
-		
-		# Convert the filtered keyframe points to bz2 keyframe animations
-		for key_type, points in filtered_keyframe_points.items():
-			bz2_keyframe_type = 2 if key_type == "location" else 0
-			
-			if not points:
+	def sample_animation(self, keyed_frames, location_path, matrix_at_frame):
+		"""One translation key block (location keys) and one quaternion block (rotation keys, euler or
+		quaternion), each key sampled once per keyed frame. Returns to the rest frame afterwards."""
+		location_frames = keyed_frames.pop(location_path, [])
+		rotation_frames = sorted(set(frame for frames in keyed_frames.values() for frame in frames))
+
+		for bz2_keyframe_type, frames in ((2, location_frames), (0, rotation_frames)):
+			if not frames:
 				continue
-			
+
 			bz2anim = bz2xsi.AnimationKey(bz2_keyframe_type)
-			
-			for point in points:
-				#~ bpy.context.scene.frame_set(point.co[0])
-				pos = int(point.co[0])
+
+			for pos in frames:
 				bpy.context.scene.frame_set(pos)
-				
+				matrix = matrix_at_frame()
+
 				if bz2_keyframe_type == 2:
-					bz2anim.add_key(pos, tuple(Matrix(obj.matrix_local).to_translation()))
-				elif bz2_keyframe_type == 0:
-					bz2anim.add_key(pos, tuple(Matrix(obj.matrix_local).transposed().to_quaternion()))
+					bz2anim.add_key(pos, tuple(matrix.to_translation()))
+				else:
+					bz2anim.add_key(pos, tuple(matrix.transposed().to_quaternion()))
 
 			yield bz2anim
-	
+
+		bpy.context.scene.frame_set(self.rest_frame)
+
+	def animation_to_bz2anim(self, obj):
+		keyed_frames = get_keyframes_filtered(obj.animation_data, KEYFRAME_PATHS)
+		yield from self.sample_animation(keyed_frames, "location", lambda: Matrix(obj.matrix_local))
+
 	def bone_to_bz2frame(self, bone, posebone, armature):
 		bz2frame = bz2xsi.Frame(bone.name)
 		bz2frame.is_bone = True
@@ -387,38 +426,16 @@ class Save:
 	
 	def bone_animation_to_bz2anim(self, bone, posebone, armature):
 		# fcurves will be in the armature object, not in the bone object.
-		keyframe_filter = ["pose.bones[\"%s\"].%s" % (bone.name, path) for path in KEYFRAME_PATHS]
-		filtered_keyframe_points = get_keyframes_filtered(armature.animation_data.action, keyframe_filter)
-		
-		# Convert the filtered keyframe points to bz2 keyframe animations
-		location_path_name = "pose.bones[\"%s\"].location" % bone.name
-		for key_type, points in filtered_keyframe_points.items():
-			bz2_keyframe_type = 2 if key_type == location_path_name else 0
-			
-			if not points:
-				continue
-			
-			bz2anim = bz2xsi.AnimationKey(bz2_keyframe_type)
-			
-			for point in points:
-				#~ bpy.context.scene.frame_set(point.co[0])
-				pos = int(point.co[0])
-				bpy.context.scene.frame_set(pos)
-				
-				if posebone.parent:
-					matrix = Matrix(posebone.parent.matrix).inverted()
-					matrix @= Matrix(posebone.matrix)
-				else:
-					matrix = Matrix(posebone.matrix)
-				
-				if bz2_keyframe_type == 2:
-					bz2anim.add_key(pos, tuple(matrix.to_translation()))
-				
-				elif bz2_keyframe_type == 0:
-					bz2anim.add_key(pos, tuple(matrix.transposed().to_quaternion()))
+		prefix = "pose.bones[\"%s\"]." % bpy.utils.escape_identifier(bone.name)
+		keyed_frames = get_keyframes_filtered(armature.animation_data, [prefix + path for path in KEYFRAME_PATHS])
 
-			yield bz2anim
-	
+		def local_matrix():
+			if posebone.parent:
+				return Matrix(posebone.parent.matrix).inverted() @ Matrix(posebone.matrix)
+			return Matrix(posebone.matrix)
+
+		yield from self.sample_animation(keyed_frames, prefix + "location", local_matrix)
+
 	def mesh_to_bz2mesh(self, data, name=None):
 		bz2mesh = bz2xsi.Mesh(name if name else data.name)
 		if OLD_NORMALS:
@@ -427,7 +444,7 @@ class Save:
 		
 		if self.opt["export_mesh_materials"]:
 			for material in data.materials:
-				bz2materials += [self.material_to_bz2material(material)]
+				bz2materials += [self.material_to_bz2material(material) if material else bz2xsi.Material()]
 		
 		for vertex in data.vertices:
 			bz2mesh.vertices += [tuple(vertex.co.xyz)]
