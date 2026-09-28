@@ -63,6 +63,12 @@ The older `Action.fcurves` path remains for Blender 4.1–4.3, but those version
 
 This repository is packaged as a **legacy Blender add-on**. Blender versions that still support installing legacy add-ons can install the release ZIP or a correctly packaged source checkout.
 
+### Blender Extensions migration
+
+Migration to Blender's current **Extensions** package format is underway on `feature/blender-extension-migration`. The runtime code already uses relative package imports and does not rely on writing into the installed add-on directory, so the main remaining work is packaging and installed-Extension validation.
+
+The original upstream project, `frute94/io_scene_bz2xsi`, does not currently declare a software license. Because this fork contains and modifies that code, a final Extension manifest is intentionally not being published with a guessed license. See [`docs/BLENDER_EXTENSION_MIGRATION.md`](docs/BLENDER_EXTENSION_MIGRATION.md) for the technical migration status and licensing blocker.
+
 ## Skinned models and animation
 
 v1.0.10 includes a substantial rewrite of the skinned-model path.
@@ -170,9 +176,9 @@ See the test script docstring for the corpus environment variables used by the f
 
 ## Release packaging
 
-GitHub release tags matching `v*` run the release workflow.
+Merging a `release/*` pull request into `main` runs the release workflow. It derives the version from `bl_info["version"]`, creates the matching version tag, validates the runtime files, byte-compiles the add-on, builds and verifies the installable ZIP, and publishes the GitHub Release.
 
-The workflow verifies that the tag matches `bl_info["version"]`, byte-compiles the runtime Python files, builds the installable Blender ZIP, checks its layout, and attaches the package to the GitHub Release.
+Tag pushes and manual workflow dispatch remain available as fallback release paths.
 
 ## Scope
 
