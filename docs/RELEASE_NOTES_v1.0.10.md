@@ -64,6 +64,10 @@ The Blender 5.2 regression pass completed with:
 
 The skinned-model tests compare Blender's evaluated deformation against an independent NumPy implementation of the XSI skinning transform.
 
+## Release automation
+
+This release is published automatically when its `release/*` pull request is merged into `main`. The workflow creates the matching version tag, builds and validates the Blender add-on ZIP, and publishes the GitHub Release.
+
 ## Installation
 
 1. Download `io_scene_bz2xsi-v1.0.10.zip` from this release.
