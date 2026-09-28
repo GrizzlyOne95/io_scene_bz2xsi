@@ -1,43 +1,103 @@
 # Battlezone II XSI Importer / Exporter for Blender
 
-Blender add-on for importing and exporting Battlezone II / Combat Commander XSI assets.
+Blender add-on for working with **Battlezone II** / **Battlezone: Combat Commander** Softimage XSI assets.
+
+It imports game XSI models and scenes into Blender, exports supported Blender scenes back to the game's XSI format, can browse and extract assets from Battlezone II `.pak` archives, and includes texture helpers for original game art formats.
+
+## Project status
+
+- **Add-on version:** v1.0.9
+- **Blender metadata:** Blender 4.1+
+- **Current development branch:** `main`
+- **Validated on current `main`:** Blender 5.2
+- **Distribution:** legacy Blender add-on (not a Blender Extensions package)
+
+> **Release vs. current main:** the latest packaged GitHub Release is **v1.0.9**, published before the Blender 5 animation, skinning, PAK-path, and exporter fixes merged on September 26, 2026. If you need those fixes today, install from the current `main` source checkout until a newer release is published.
 
 ## Features
 
-- Import `.xsi` models and scenes.
+### XSI import
+
+- Import Battlezone II / Combat Commander `.xsi` models and scenes.
+- Import meshes, normals, UVs, vertex colors, materials, lights, and cameras.
+- Import object animation and bone-envelope animation.
+- Support Blender 4.4+/5.x layered Actions.
+- Build skinned armatures from `SI_FrameBasePoseMatrix` bind poses.
+- Preserve bone ancestry across non-bone XSI frames.
+- Convert XSI root orientation to Blender's coordinate system.
+- Emulate common Battlezone II XSI frame flags.
+- Preserve Battlezone material override values as Blender custom properties.
+
+### XSI export
+
 - Export supported Blender scenes back to Battlezone II XSI.
-- Browse/import XSI assets directly from Battlezone II `.pak` archives.
-- Extract `.pak` archives.
-- Decode Softimage `.pic` textures and convert them to PNG during import.
-- Handle common Battlezone II material, UV, vertex-color, animation, envelope, light, and camera data.
+- Export the active collection or selected objects.
+- Export meshes, UVs, materials, vertex colors, envelopes, and animation.
+- Export Blender 4.4+/5.x layered Actions.
+- Export skinned meshes in the armature rest pose.
+- Write texture references by file name for game-friendly output.
+- Optional generated helper geometry for empty objects and bones.
+
+### PAK support
+
+- Browse XSI assets directly inside Battlezone II `.pak` archives.
+- Import a selected XSI asset without manually extracting the whole archive first.
+- Extract complete PAK archives from Blender.
+- Preserve the archive's directory layout, including the game's 1-based directory table indexing.
+- Optionally cache extracted PAK contents.
+
+### Texture support
+
+- Decode Softimage `.pic` textures and save PNG copies during import.
+- Convert Battlezone II `.dxtbz2` textures to DDS automatically.
+- Search common image formats when resolving XSI texture references.
+- Ignore obsolete `//SERVER/...` studio-network texture paths and resolve assets locally instead.
+- Cache texture lookups during an import.
+- Handle Battlezone II `reflection3` chrome material setup using Blender's current Principled BSDF inputs.
 
 ## Blender compatibility
 
-The add-on metadata requires **Blender 4.1 or newer**. The current v1.0.9 code includes compatibility work for the Blender 4.5 LTS API, including modern mesh normals and color attributes.
+The add-on metadata requires **Blender 4.1 or newer**.
 
-Animation import/export also works with the layered Actions of Blender 4.4+ and Blender 5.x.
+The current `main` branch includes explicit support for the layered Action API introduced in Blender 4.4 and used by Blender 5.x. Import and export regression testing was performed with **Blender 5.2**.
 
-This repository is distributed as a **legacy Blender add-on** rather than a Blender Extensions package. Blender 4.5 LTS still supports installing legacy add-ons from disk.
+The older `Action.fcurves` path remains for Blender 4.1–4.3, but those versions were not part of the September 2026 regression run.
 
-## Skinned models
+This repository is packaged as a **legacy Blender add-on**. Blender versions that still support installing legacy add-ons can install the release ZIP or a correctly packaged source checkout.
 
-Skinned (enveloped) XSI files import as an armature whose bones sit at the frames' `SI_FrameBasePoseMatrix` bind pose (bone Y axis = frame Y axis), with the skinned meshes placed at their bind transform. Bone animation is converted so every bone follows its frame's animated matrix, including animated plain frames between two bones, so the deformation matches the XSI data exactly (verified against a numpy re-implementation on `mcwing_fly.xsi` and `jak_kill.xsi`). Frames that are also objects keep their object animation.
+## Skinned models and animation
 
-On export, skinned meshes are written in the armature's rest pose, matching the exported bone rest matrices.
+Current `main` contains a substantial rewrite of the skinned-model path.
 
-## Install from a GitHub Release
+Skinned XSI files are imported with bones placed from their `SI_FrameBasePoseMatrix` bind transforms. Skinned meshes retain their bind transform, and pose bones are animated so each bone follows its XSI frame's animated world matrix.
 
-1. Download `io_scene_bz2xsi-v1.0.9.zip` from the latest GitHub Release.
+This also handles cases where plain, non-bone frames exist between bones in the XSI hierarchy.
+
+The deformation path was checked against an independent NumPy implementation of XSI skinning on real Battlezone assets including `mcwing_fly.xsi` and `jak_kill.xsi`.
+
+On export, skinned meshes are written from the armature rest pose so the mesh and exported bone rest matrices remain consistent.
+
+## Installing the latest GitHub Release
+
+The latest packaged release is currently **v1.0.9**.
+
+1. Download `io_scene_bz2xsi-v1.0.9.zip` from the GitHub Releases page.
 2. In Blender, open **Edit > Preferences > Add-ons**.
-3. Use **Install from Disk** and select the ZIP.
+3. Choose **Install from Disk** and select the ZIP.
 4. Enable **BZ2 XSI format**.
 5. Use **File > Import > BZ2 XSI / PAK** or **File > Export > BZ2 XSI**.
 
-Do not unzip the release archive manually before installing it. The release ZIP already contains the required top-level `io_scene_bz2xsi` folder.
+Do not manually unpack the release ZIP before installing it. The archive already contains the required top-level `io_scene_bz2xsi` directory.
+
+### Need the latest Blender 5 fixes?
+
+The September 26 fixes are newer than v1.0.9. Until a newer release is published, install the current `main` source as described below.
 
 ## Manual development install
 
-For a source checkout, create an `io_scene_bz2xsi` directory inside Blender's add-ons directory and place these runtime files inside it:
+Clone or download the repository, then place the add-on in an `io_scene_bz2xsi` directory inside Blender's add-ons directory.
+
+The runtime add-on consists of:
 
 - `__init__.py`
 - `bz2xsi.py`
@@ -46,12 +106,82 @@ For a source checkout, create an `io_scene_bz2xsi` directory inside Blender's ad
 - `xsi_blender_importer.py`
 - `xsi_blender_exporter.py`
 
-Restart Blender or refresh add-ons, then enable **BZ2 XSI format**.
+Restart Blender or refresh the add-on list, then enable **BZ2 XSI format**.
+
+## Basic usage
+
+### Import an XSI file
+
+Use **File > Import > BZ2 XSI / PAK**, select an `.xsi` file, configure the desired mesh, material, texture, animation, and envelope options, then import.
+
+### Import from a PAK archive
+
+Use **File > Import > BZ2 XSI / PAK** and select a `.pak` file. The import panel exposes the XSI assets found in the archive so one can be selected and imported directly.
+
+### Extract a PAK archive
+
+Use **File > Import > BZ2 PAK Extract**, choose the archive and output directory, and extract the complete file tree.
+
+### Export XSI
+
+Use **File > Export > BZ2 XSI**. Export can operate on the active collection or selected objects and can include mesh data, materials, vertex colors, envelopes, and animation.
+
+## Recent fixes on `main`
+
+The September 26, 2026 Blender 5 compatibility pass fixed several issues that could materially affect real game assets:
+
+- Restored animation import on Blender 4.4+/5.x after the removal of the legacy `Action.fcurves` interface.
+- Corrected skinned bind-pose and animated-bone transforms.
+- Fixed bone parenting when non-bone frames appear in the hierarchy.
+- Fixed object-animation transforms and offset-root coordinate conversion.
+- Corrected PAK extraction directory assignment.
+- Fixed an XSI envelope-parser skip that could discard a following `AnimationSet`.
+- Fixed vertex-color writer output so exported data can be parsed back correctly.
+- Fixed duplicated animation keys on export.
+- Fixed exporter rest transforms being sampled from the previous object's last animation frame.
+- Fixed crashes from empty material slots and generated bone meshes.
+- Fixed duplicate child export in **Only Selected Objects** mode.
+- Fixed texture paths being exported as full host paths.
+- Avoided slow probes of obsolete network texture paths and cached texture lookups.
+- Updated Blender 5 normal/material API handling.
 
 ## Tests
 
-`tests/xsi_parse_corpus.py <folder>` parses every XSI in a folder with `bz2xsi` alone. `tests/xsi_blender_tests.py` runs named importer/exporter regression tests headless in Blender (`blender -b --factory-startup -P tests/xsi_blender_tests.py -- [tests]`); see its docstring for the corpus environment variables.
+Two regression-test paths are included under `tests/`.
+
+### Parser corpus
+
+```text
+tests/xsi_parse_corpus.py <folder>
+```
+
+This parses every XSI file in a supplied folder using the standalone `bz2xsi` parser.
+
+### Blender regression suite
+
+```text
+blender -b --factory-startup -P tests/xsi_blender_tests.py -- [tests]
+```
+
+The Blender suite exercises importer/exporter behavior, animation, skinning, round trips, PAK import, materials, and known edge cases.
+
+For the September 26 Blender 5.2 validation:
+
+- **21 named regression tests passed.**
+- **101 BZCC source XSI files imported with 0 failures.**
+- **23 Battlezone II demo XSI files imported with 0 failures.**
+- The source corpus included **35 animated** and **4 skinned** assets.
+
+See the test script docstring for the corpus environment variables used by the full-data tests.
 
 ## Release packaging
 
-GitHub release tags (`v*`) are validated before publishing. The release workflow checks that the tag matches `bl_info["version"]`, byte-compiles the runtime Python files, builds an installable Blender ZIP, verifies its layout, and attaches it to the GitHub Release.
+GitHub release tags matching `v*` run the release workflow.
+
+The workflow verifies that the tag matches `bl_info["version"]`, byte-compiles the runtime Python files, builds the installable Blender ZIP, checks its layout, and attaches the package to the GitHub Release.
+
+## Scope
+
+The add-on targets the XSI dialect and asset conventions used by Battlezone II / Battlezone: Combat Commander. It is not intended to be a general-purpose Softimage XSI implementation.
+
+Because the format contains game- and toolchain-specific behavior, round-trip fidelity should still be validated on important production assets before replacing original source files.
