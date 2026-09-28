@@ -6,7 +6,7 @@ It imports game XSI models and scenes into Blender, exports supported Blender sc
 
 ## Project status
 
-- **Add-on version:** v1.0.10
+- **Add-on version:** v1.0.11
 - **Blender metadata:** Blender 4.1+
 - **Current development branch:** `main`
 - **Validated on current `main`:** Blender 5.2
@@ -65,7 +65,7 @@ This repository is packaged as a **legacy Blender add-on**. Blender versions tha
 
 ## Skinned models and animation
 
-v1.0.10 includes a substantial rewrite of the skinned-model path.
+v1.0.11 includes the Blender 5/skinned-model fixes introduced in v1.0.10, plus documentation clarifying the Blender Extensions migration and upstream licensing status.
 
 Skinned XSI files are imported with bones placed from their `SI_FrameBasePoseMatrix` bind transforms. Skinned meshes retain their bind transform, and pose bones are animated so each bone follows its XSI frame's animated world matrix.
 
@@ -77,9 +77,9 @@ On export, skinned meshes are written from the armature rest pose so the mesh an
 
 ## Installing the latest GitHub Release
 
-The latest packaged release is **v1.0.10**.
+The latest packaged release is **v1.0.11**.
 
-1. Download `io_scene_bz2xsi-v1.0.10.zip` from the GitHub Releases page.
+1. Download `io_scene_bz2xsi-v1.0.11.zip` from the GitHub Releases page.
 2. In Blender, open **Edit > Preferences > Add-ons**.
 3. Choose **Install from Disk** and select the ZIP.
 4. Enable **BZ2 XSI format**.
@@ -120,7 +120,13 @@ Use **File > Import > BZ2 PAK Extract**, choose the archive and output directory
 
 Use **File > Export > BZ2 XSI**. Export can operate on the active collection or selected objects and can include mesh data, materials, vertex colors, envelopes, and animation.
 
-## v1.0.10 highlights
+## Blender Extensions migration and licensing
+
+A Blender Extensions migration is in progress, targeting a future **v1.1.0** release. The original upstream repository (`frute94/io_scene_bz2xsi`) does not currently declare a software license in the repository, README, or source headers. Because this fork contains and modifies that upstream code, the project is not assigning a new license to the inherited code without an explicit grant from the original copyright holder.
+
+Until that is clarified, releases remain in Blender's legacy add-on ZIP format. The Extension migration work is being kept separate so packaging can be finalized quickly once licensing is resolved.
+
+## v1.0.10 runtime highlights
 
 The September 26, 2026 Blender 5 compatibility pass fixed several issues that could materially affect real game assets:
 
@@ -170,9 +176,9 @@ See the test script docstring for the corpus environment variables used by the f
 
 ## Release packaging
 
-GitHub release tags matching `v*` run the release workflow.
+Merging a `release/*` pull request into `main` publishes a release automatically. The workflow derives the version from `bl_info["version"]`, creates the matching `vX.Y.Z` tag, validates the runtime files, byte-compiles the add-on, builds and verifies the installable ZIP, and publishes the GitHub Release.
 
-The workflow verifies that the tag matches `bl_info["version"]`, byte-compiles the runtime Python files, builds the installable Blender ZIP, checks its layout, and attaches the package to the GitHub Release.
+Tag pushes and manual workflow dispatch remain available as fallback release paths.
 
 ## Scope
 
