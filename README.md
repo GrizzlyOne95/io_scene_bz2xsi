@@ -6,13 +6,11 @@ It imports game XSI models and scenes into Blender, exports supported Blender sc
 
 ## Project status
 
-- **Add-on version:** v1.0.9
+- **Add-on version:** v1.0.10
 - **Blender metadata:** Blender 4.1+
 - **Current development branch:** `main`
 - **Validated on current `main`:** Blender 5.2
 - **Distribution:** legacy Blender add-on (not a Blender Extensions package)
-
-> **Release vs. current main:** the latest packaged GitHub Release is **v1.0.9**, published before the Blender 5 animation, skinning, PAK-path, and exporter fixes merged on September 26, 2026. If you need those fixes today, install from the current `main` source checkout until a newer release is published.
 
 ## Features
 
@@ -67,7 +65,7 @@ This repository is packaged as a **legacy Blender add-on**. Blender versions tha
 
 ## Skinned models and animation
 
-Current `main` contains a substantial rewrite of the skinned-model path.
+v1.0.10 includes a substantial rewrite of the skinned-model path.
 
 Skinned XSI files are imported with bones placed from their `SI_FrameBasePoseMatrix` bind transforms. Skinned meshes retain their bind transform, and pose bones are animated so each bone follows its XSI frame's animated world matrix.
 
@@ -79,19 +77,15 @@ On export, skinned meshes are written from the armature rest pose so the mesh an
 
 ## Installing the latest GitHub Release
 
-The latest packaged release is currently **v1.0.9**.
+The latest packaged release is **v1.0.10**.
 
-1. Download `io_scene_bz2xsi-v1.0.9.zip` from the GitHub Releases page.
+1. Download `io_scene_bz2xsi-v1.0.10.zip` from the GitHub Releases page.
 2. In Blender, open **Edit > Preferences > Add-ons**.
 3. Choose **Install from Disk** and select the ZIP.
 4. Enable **BZ2 XSI format**.
 5. Use **File > Import > BZ2 XSI / PAK** or **File > Export > BZ2 XSI**.
 
 Do not manually unpack the release ZIP before installing it. The archive already contains the required top-level `io_scene_bz2xsi` directory.
-
-### Need the latest Blender 5 fixes?
-
-The September 26 fixes are newer than v1.0.9. Until a newer release is published, install the current `main` source as described below.
 
 ## Manual development install
 
@@ -126,7 +120,7 @@ Use **File > Import > BZ2 PAK Extract**, choose the archive and output directory
 
 Use **File > Export > BZ2 XSI**. Export can operate on the active collection or selected objects and can include mesh data, materials, vertex colors, envelopes, and animation.
 
-## Recent fixes on `main`
+## v1.0.10 highlights
 
 The September 26, 2026 Blender 5 compatibility pass fixed several issues that could materially affect real game assets:
 

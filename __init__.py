@@ -1,7 +1,7 @@
 bl_info = {
 	"name": "BZ2 XSI format",
 	"author": "FruteSoftware@gmail.com",
-	"version": (1, 0, 9),
+	"version": (1, 0, 10),
 	"blender": (4, 1, 0),
 	"location": "File > Import-Export",
 	"description": "Battlezone II XSI Importer/Exporter",
