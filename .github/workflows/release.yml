@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v*'
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       tag:
@@ -13,17 +18,58 @@ on:
 
 permissions:
   contents: write
+  pull-requests: read
 
 jobs:
   release:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.merged == true &&
+       startsWith(github.event.pull_request.head.ref, 'release/'))
     runs-on: ubuntu-latest
-    env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
     steps:
-      - name: Check out tagged source
+      - name: Check out release source
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.merge_commit_sha || github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            VERSION="$(python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          tree = ast.parse(Path('__init__.py').read_text(encoding='utf-8'))
+          for node in tree.body:
+              if isinstance(node, ast.Assign):
+                  for target in node.targets:
+                      if isinstance(target, ast.Name) and target.id == 'bl_info':
+                          info = ast.literal_eval(node.value)
+                          print('.'.join(str(part) for part in info['version']))
+                          raise SystemExit
+          raise SystemExit('bl_info not found in __init__.py')
+          PY
+            )"
+            RELEASE_TAG="v${VERSION}"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            RELEASE_TAG="${{ inputs.tag }}"
+          else
+            RELEASE_TAG="${{ github.ref_name }}"
+          fi
+
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+          echo "Resolved release tag: $RELEASE_TAG"
 
       - name: Validate version and runtime files
         run: |
@@ -67,6 +113,22 @@ jobs:
 
           print(f'Validated Blender add-on version {actual}')
           PY
+
+      - name: Create release tag for merged release PR
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release tag $RELEASE_TAG already exists; refusing to retag a release." >&2
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$RELEASE_TAG"
+          git push origin "$RELEASE_TAG"
 
       - name: Byte-compile add-on
         run: |
