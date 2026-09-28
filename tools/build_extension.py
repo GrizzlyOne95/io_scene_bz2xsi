@@ -52,6 +52,13 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    license_file = ROOT / "LICENSE"
+    if not license_file.is_file():
+        raise SystemExit(
+            "Cannot build an Extension: repository LICENSE is missing. "
+            "Resolve the upstream software license first."
+        )
+
     version = args.version or addon_version()
     manifest = render_manifest(version, args.license)
     output_dir = args.output_dir.resolve()
@@ -65,9 +72,7 @@ def main() -> int:
         for name in RUNTIME_FILES:
             shutil.copy2(ROOT / name, stage / name)
 
-        license_file = ROOT / "LICENSE"
-        if license_file.is_file():
-            shutil.copy2(license_file, stage / "LICENSE")
+        shutil.copy2(license_file, stage / "LICENSE")
 
         (stage / "blender_manifest.toml").write_text(
             manifest,
