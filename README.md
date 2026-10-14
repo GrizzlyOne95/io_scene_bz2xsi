@@ -63,6 +63,12 @@ The older `Action.fcurves` path remains for Blender 4.1–4.3, but those version
 
 This repository is packaged as a **legacy Blender add-on**. Blender versions that still support installing legacy add-ons can install the release ZIP or a correctly packaged source checkout.
 
+### Blender Extensions migration
+
+Migration to Blender's current **Extensions** package format is underway on `feature/blender-extension-migration`. The runtime code already uses relative package imports and does not rely on writing into the installed add-on directory, so the main remaining work is packaging and installed-Extension validation.
+
+The original upstream project, `frute94/io_scene_bz2xsi`, does not currently declare a software license. Because this fork contains and modifies that code, a final Extension manifest is intentionally not being published with a guessed license. See [`docs/BLENDER_EXTENSION_MIGRATION.md`](docs/BLENDER_EXTENSION_MIGRATION.md) for the technical migration status and licensing blocker.
+
 ## Skinned models and animation
 
 v1.0.11 includes the Blender 5/skinned-model fixes introduced in v1.0.10, plus documentation clarifying the Blender Extensions migration and upstream licensing status.

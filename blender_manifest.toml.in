@@ -1,0 +1,40 @@
+# Blender Extensions manifest template.
+# This is intentionally not named blender_manifest.toml yet because the
+# upstream project did not publish a software license. Generate the final
+# manifest only after an explicit SPDX license has been established.
+
+schema_version = "1.0.0"
+
+id = "io_scene_bz2xsi"
+version = "@VERSION@"
+name = "Battlezone II XSI Importer / Exporter"
+tagline = "Import and export Battlezone II XSI assets"
+maintainer = "GrizzlyOne95"
+type = "add-on"
+
+website = "https://github.com/GrizzlyOne95/io_scene_bz2xsi"
+tags = ["Import-Export"]
+
+blender_version_min = "4.2.0"
+
+license = [
+  "SPDX:@LICENSE@",
+]
+
+[permissions]
+files = "Import and export Battlezone II assets and converted textures"
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "/.git/",
+  "/.github/",
+  "/tests/",
+  "/tools/",
+  "/docs/",
+  "/branding/",
+  "/blender_manifest.toml.in",
+  "/*.zip",
+  "/*.sln",
+  "/Fixes.notepad",
+]
